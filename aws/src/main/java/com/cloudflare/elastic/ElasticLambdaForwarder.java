@@ -14,6 +14,7 @@
 package com.cloudflare.elastic;
 
 import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.Context;
@@ -25,6 +26,8 @@ import com.amazonaws.services.s3.event.S3EventNotification;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectInputStream;
+import com.amazonaws.services.secretsmanager.*;
+import com.amazonaws.services.secretsmanager.model.*;
 
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -55,6 +58,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -74,6 +78,7 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
     private static final String ENV_ELASTIC_DEBUG        = "elastic_debug";
     private static final String ENV_AWS_ACCESS_KEY       = "aws_access_key";
     private static final String ENV_AWS_SECRET_KEY       = "aws_secret_key";
+    private static final String ENV_AWS_SECRETSMANAGER   = "aws_secretsmanager";
 
     private LambdaLogger logger = null;
 
@@ -88,6 +93,7 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
     private static boolean ELASTIC_HTTPS       = true;
     private static boolean ELASTIC_DEBUG       = false;
     private static boolean USE_AWS_CREDENTIALS = false;
+    private static boolean AWS_SECRETSMANAGER   = false;
 
 
     @Override
@@ -218,6 +224,51 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
         return client;
     }
 
+    private static String GetSecret(String secretName) {
+
+//        String secretName = "testSecret";
+        String endpoint = "secretsmanager.us-west-2.amazonaws.com";
+        String region = "us-west-2";
+
+        AwsClientBuilder.EndpointConfiguration config = new AwsClientBuilder.EndpointConfiguration(endpoint, region);
+        AWSSecretsManagerClientBuilder clientBuilder = AWSSecretsManagerClientBuilder.standard();
+        clientBuilder.setEndpointConfiguration(config);
+        AWSSecretsManager client = clientBuilder.build();
+
+        String secret;
+        ByteBuffer binarySecretData;
+        GetSecretValueRequest getSecretValueRequest = new GetSecretValueRequest()
+                .withSecretId(secretName).withVersionStage("AWSCURRENT");
+        GetSecretValueResult getSecretValueResult = null;
+        try {
+            getSecretValueResult = client.getSecretValue(getSecretValueRequest);
+
+        } catch(ResourceNotFoundException e) {
+            throw new RuntimeException("The requested secret " + secretName + " was not found");
+        } catch (InvalidRequestException e) {
+            throw new RuntimeException("The request was invalid due to: " + e.getMessage());
+        } catch (InvalidParameterException e) {
+            throw new RuntimeException("The request had invalid params: " + e.getMessage());
+        }
+
+        if(getSecretValueResult == null) {
+            return null;
+        }
+
+        // Depending on whether the secret was a string or binary, one of these fields will be populated
+        if(getSecretValueResult.getSecretString() != null) {
+            secret = getSecretValueResult.getSecretString();
+//            System.out.println(secret);
+            return secret;
+        }
+        else {
+            binarySecretData = getSecretValueResult.getSecretBinary();
+//            System.out.println(binarySecretData.toString());
+            return binarySecretData.toString();
+        }
+
+    }
+
     private AmazonS3 getS3Client()
     {
         if (USE_AWS_CREDENTIALS) {
@@ -275,19 +326,39 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
             ELASTIC_DEBUG = Boolean.parseBoolean(debug);
         }
 
-        ELASTIC_HOSTNAME = System.getenv(ENV_ELASTIC_HOST);
-        if (ELASTIC_HOSTNAME == null || ELASTIC_HOSTNAME.isEmpty()) {
-            throw new RuntimeException("Elastic hostname not set; please set '" + ENV_ELASTIC_HOST + "'");
+        String secretsmanager = System.getenv(ENV_AWS_SECRETSMANAGER);
+        if (secretsmanager != null) {
+            AWS_SECRETSMANAGER = Boolean.parseBoolean(secretsmanager);
         }
 
-        ELASTIC_USERNAME = System.getenv(ENV_ELASTIC_USERNAME);
-        if (ELASTIC_USERNAME == null || ELASTIC_USERNAME.isEmpty()) {
-            throw new RuntimeException("Elastic username not set; please set '" + ENV_ELASTIC_USERNAME + "'");
-        }
+        if (AWS_SECRETSMANAGER){
+            ELASTIC_HOSTNAME = GetSecret(ENV_ELASTIC_HOST);
+            if (ELASTIC_HOSTNAME == null || ELASTIC_HOSTNAME.isEmpty()) {
+                throw new RuntimeException("Elastic hostname not set; please set '" + ENV_ELASTIC_HOST + "'");
+            }
+            ELASTIC_USERNAME = GetSecret(ENV_ELASTIC_USERNAME);
+            if (ELASTIC_USERNAME == null || ELASTIC_USERNAME.isEmpty()) {
+                throw new RuntimeException("Elastic username not set; please set '" + ENV_ELASTIC_USERNAME + "'");
+            }
+            ELASTIC_PASSWORD = GetSecret(ENV_ELASTIC_PASSWORD);
+            if (ELASTIC_PASSWORD == null || ELASTIC_PASSWORD.isEmpty()) {
+                throw new RuntimeException("Elastic password not set; please set '" + ENV_ELASTIC_PASSWORD + "'");
+            }
+        } else {
+            ELASTIC_HOSTNAME = System.getenv(ENV_ELASTIC_HOST);
+            if (ELASTIC_HOSTNAME == null || ELASTIC_HOSTNAME.isEmpty()) {
+                throw new RuntimeException("Elastic hostname not set; please set '" + ENV_ELASTIC_HOST + "'");
+            }
 
-        ELASTIC_PASSWORD = System.getenv(ENV_ELASTIC_PASSWORD);
-        if (ELASTIC_PASSWORD == null || ELASTIC_PASSWORD.isEmpty()) {
-            throw new RuntimeException("Elastic password not set; please set '" + ENV_ELASTIC_PASSWORD + "'");
+            ELASTIC_USERNAME = System.getenv(ENV_ELASTIC_USERNAME);
+            if (ELASTIC_USERNAME == null || ELASTIC_USERNAME.isEmpty()) {
+                throw new RuntimeException("Elastic username not set; please set '" + ENV_ELASTIC_USERNAME + "'");
+            }
+
+            ELASTIC_PASSWORD = System.getenv(ENV_ELASTIC_PASSWORD);
+            if (ELASTIC_PASSWORD == null || ELASTIC_PASSWORD.isEmpty()) {
+                throw new RuntimeException("Elastic password not set; please set '" + ENV_ELASTIC_PASSWORD + "'");
+            }
         }
 
         if (System.getenv(ENV_AWS_ACCESS_KEY) != null && System.getenv(ENV_AWS_SECRET_KEY) != null) {
