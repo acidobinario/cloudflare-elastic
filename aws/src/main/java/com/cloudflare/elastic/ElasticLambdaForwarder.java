@@ -64,6 +64,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.zip.GZIPInputStream;
 
+import com.fasterxml.jackson.databind.*;
+
+
 public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
 {
     private static final String ENV_ELASTIC_HOST         = "elastic_hostname";
@@ -224,9 +227,9 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
         return client;
     }
 
-    private static String GetSecret(String secretName) {
+    private static void GetSecret() {
 
-//        String secretName = "testSecret";
+        String secretName = "cloudflare-logs";
         String endpoint = "secretsmanager.us-west-2.amazonaws.com";
         String region = "us-west-2";
 
@@ -234,8 +237,10 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
         AWSSecretsManagerClientBuilder clientBuilder = AWSSecretsManagerClientBuilder.standard();
         clientBuilder.setEndpointConfiguration(config);
         AWSSecretsManager client = clientBuilder.build();
+        ObjectMapper  objectMapper  =  new  ObjectMapper();
 
         String secret;
+        JsonNode  secretsJson  =  null;
         ByteBuffer binarySecretData;
         GetSecretValueRequest getSecretValueRequest = new GetSecretValueRequest()
                 .withSecretId(secretName).withVersionStage("AWSCURRENT");
@@ -251,22 +256,25 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
             throw new RuntimeException("The request had invalid params: " + e.getMessage());
         }
 
-        if(getSecretValueResult == null) {
-            return null;
+        //new code stuff thing from https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/manage-credentials-using-aws-secrets-manager.html
+        secret = getSecretValueResult.getSecretString();
+
+        if (secret != null) {
+            try {
+                secretsJson  =  objectMapper.readTree(secret);
+            }
+
+            catch  (IOException  e)  {
+                throw new RuntimeException("Exception while retrieving secret values: "  +  e.getMessage());
+            }
         }
 
-        // Depending on whether the secret was a string or binary, one of these fields will be populated
-        if(getSecretValueResult.getSecretString() != null) {
-            secret = getSecretValueResult.getSecretString();
-//            System.out.println(secret);
-            return secret;
+        else  {
+            throw new RuntimeException("The Secret String returned is null");
         }
-        else {
-            binarySecretData = getSecretValueResult.getSecretBinary();
-//            System.out.println(binarySecretData.toString());
-            return binarySecretData.toString();
-        }
-
+        ELASTIC_HOSTNAME  =  secretsJson.get(ENV_ELASTIC_HOST).textValue();
+        ELASTIC_USERNAME  =  secretsJson.get(ENV_ELASTIC_USERNAME).textValue();
+        ELASTIC_PASSWORD  =  secretsJson.get(ENV_ELASTIC_PASSWORD).textValue();
     }
 
     private AmazonS3 getS3Client()
@@ -332,18 +340,7 @@ public class ElasticLambdaForwarder implements RequestHandler<S3Event, Void>
         }
 
         if (AWS_SECRETSMANAGER){
-            ELASTIC_HOSTNAME = GetSecret(ENV_ELASTIC_HOST);
-            if (ELASTIC_HOSTNAME == null || ELASTIC_HOSTNAME.isEmpty()) {
-                throw new RuntimeException("Elastic hostname not set; please set '" + ENV_ELASTIC_HOST + "'");
-            }
-            ELASTIC_USERNAME = GetSecret(ENV_ELASTIC_USERNAME);
-            if (ELASTIC_USERNAME == null || ELASTIC_USERNAME.isEmpty()) {
-                throw new RuntimeException("Elastic username not set; please set '" + ENV_ELASTIC_USERNAME + "'");
-            }
-            ELASTIC_PASSWORD = GetSecret(ENV_ELASTIC_PASSWORD);
-            if (ELASTIC_PASSWORD == null || ELASTIC_PASSWORD.isEmpty()) {
-                throw new RuntimeException("Elastic password not set; please set '" + ENV_ELASTIC_PASSWORD + "'");
-            }
+            GetSecret();
         } else {
             ELASTIC_HOSTNAME = System.getenv(ENV_ELASTIC_HOST);
             if (ELASTIC_HOSTNAME == null || ELASTIC_HOSTNAME.isEmpty()) {
